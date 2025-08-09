@@ -7,7 +7,7 @@ on:
     branches: [ "**" ]
 
 permissions:
-  contents: read
+  contents: write
 
 concurrency:
   group: android-ci-${{ github.ref }}
@@ -21,31 +21,75 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Set up JDK 17
+      - name: Set up JDK 11 (AGP 7.4 compatible)
         uses: actions/setup-java@v4
         with:
           distribution: temurin
-          java-version: "17"
+          java-version: '11'
 
       - name: Set up Android SDK
         uses: android-actions/setup-android@v3
         with:
           packages: |
             platform-tools
-            platforms;android-34
-            build-tools;34.0.0
+            platforms;android-30
+            build-tools;30.0.3
+            ndk;22.1.7171670
+            cmake;3.22.1
 
-      - name: Build with Gradle
+      - name: Build Debug
         uses: gradle/gradle-build-action@v2
         with:
-          gradle-version: "8.7"
-          build-root-directory: app
-          arguments: assembleDebug --no-daemon --stacktrace
+          gradle-version: '7.6'
+          arguments: :app:assembleDebug --no-daemon --stacktrace
 
-      - name: Upload APK artifacts
+      - name: Upload Debug artifacts
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: app-outputs
-          path: |
-            app/build/outputs/**
+          name: app-debug-outputs
+          path: app/build/outputs/**
+
+      - name: Prepare signing keystore (if provided)
+        if: ${{ github.event_name != 'pull_request' && (secrets.SIGNING_STORE_FILE_B64 != '' && secrets.SIGNING_STORE_PASSWORD != '' && secrets.SIGNING_KEY_ALIAS != '' && secrets.SIGNING_KEY_PASSWORD != '') }}
+        run: |
+          mkdir -p app/signing
+          echo "${{ secrets.SIGNING_STORE_FILE_B64 }}" | base64 -d > app/signing/release.jks
+        shell: bash
+
+      - name: Build Release (if signing provided)
+        if: ${{ github.event_name != 'pull_request' && (secrets.SIGNING_STORE_FILE_B64 != '' && secrets.SIGNING_STORE_PASSWORD != '' && secrets.SIGNING_KEY_ALIAS != '' && secrets.SIGNING_KEY_PASSWORD != '') }}
+        uses: gradle/gradle-build-action@v2
+        env:
+          SIGNING_STORE_FILE: app/signing/release.jks
+          SIGNING_STORE_PASSWORD: ${{ secrets.SIGNING_STORE_PASSWORD }}
+          SIGNING_KEY_ALIAS: ${{ secrets.SIGNING_KEY_ALIAS }}
+          SIGNING_KEY_PASSWORD: ${{ secrets.SIGNING_KEY_PASSWORD }}
+        with:
+          gradle-version: '7.6'
+          arguments: :app:assembleRelease --no-daemon --stacktrace
+
+      - name: Upload Release artifacts
+        if: ${{ github.event_name != 'pull_request' && (secrets.SIGNING_STORE_FILE_B64 != '' && secrets.SIGNING_STORE_PASSWORD != '' && secrets.SIGNING_KEY_ALIAS != '' && secrets.SIGNING_KEY_PASSWORD != '') }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: app-release-outputs
+          path: app/build/outputs/**
+
+      - name: Collect APKs into repo artifacts directory (main branch only)
+        if: ${{ github.ref == 'refs/heads/main' }}
+        run: |
+          rm -rf artifacts && mkdir -p artifacts/debug artifacts/release || true
+          find app/build/outputs -type f -name "*.apk" -exec bash -c 'cp -v "$1" "artifacts/${1##*/}" || true' _ {} \;
+          # Keep directory structure for clarity
+          cp -vr app/build/outputs/apk/debug/*.apk artifacts/debug/ 2>/dev/null || true
+          cp -vr app/build/outputs/apk/release/*.apk artifacts/release/ 2>/dev/null || true
+        shell: bash
+
+      - name: Commit APKs into repository (main branch only)
+        if: ${{ github.ref == 'refs/heads/main' }}
+        uses: stefanzweifel/git-auto-commit-action@v5
+        with:
+          commit_message: "chore(build): add generated APKs to artifacts/"
+          branch: main
+          file_pattern: artifacts/**
