@@ -37,16 +37,35 @@ jobs:
             ndk;22.1.7171670
             cmake;3.22.1
 
-      - name: Build with Gradle (root)
+      - name: Build Debug
         uses: gradle/gradle-build-action@v2
         with:
           gradle-version: '7.6'
           arguments: :app:assembleDebug --no-daemon --stacktrace
 
-      - name: Upload APK artifacts
+      - name: Upload Debug artifacts
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: app-outputs
-          path: |
-            app/build/outputs/**
+          name: app-debug-outputs
+          path: app/build/outputs/**
+
+      - name: Build Release (if signing provided)
+        if: ${{ github.event_name != 'pull_request' && (secrets.SIGNING_STORE_FILE_B64 != '' && secrets.SIGNING_STORE_PASSWORD != '' && secrets.SIGNING_KEY_ALIAS != '' && secrets.SIGNING_KEY_PASSWORD != '') }}
+        env:
+          SIGNING_STORE_FILE: app/signing/release.jks
+          SIGNING_STORE_PASSWORD: ${{ secrets.SIGNING_STORE_PASSWORD }}
+          SIGNING_KEY_ALIAS: ${{ secrets.SIGNING_KEY_ALIAS }}
+          SIGNING_KEY_PASSWORD: ${{ secrets.SIGNING_KEY_PASSWORD }}
+        run: |
+          mkdir -p app/signing
+          echo "${{ secrets.SIGNING_STORE_FILE_B64 }}" | base64 -d > app/signing/release.jks
+          ./gradlew :app:assembleRelease || ./gradlew --version
+        shell: bash
+
+      - name: Upload Release artifacts
+        if: ${{ github.event_name != 'pull_request' && (secrets.SIGNING_STORE_FILE_B64 != '' && secrets.SIGNING_STORE_PASSWORD != '' && secrets.SIGNING_KEY_ALIAS != '' && secrets.SIGNING_KEY_PASSWORD != '') }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: app-release-outputs
+          path: app/build/outputs/**
