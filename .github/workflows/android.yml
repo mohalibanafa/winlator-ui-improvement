@@ -37,6 +37,7 @@ jobs:
             ndk;22.1.7171670
             cmake;3.22.1
 
+      # بناء نسخة Debug دائماً
       - name: Build Debug
         uses: gradle/gradle-build-action@v2
         with:
@@ -50,27 +51,41 @@ jobs:
           name: app-debug-outputs
           path: app/build/outputs/**
 
+      # محاولة تجهيز keystore للتوقيع الرسمي إذا كان موجود
       - name: Prepare signing keystore (if provided)
-        if: ${{ github.event_name != 'pull_request' && (secrets.SIGNING_STORE_FILE_B64 != '' && secrets.SIGNING_STORE_PASSWORD != '' && secrets.SIGNING_KEY_ALIAS != '' && secrets.SIGNING_KEY_PASSWORD != '') }}
         run: |
-          mkdir -p app/signing
-          echo "${{ secrets.SIGNING_STORE_FILE_B64 }}" | base64 -d > app/signing/release.jks
-        shell: bash
-
-      - name: Build Release (if signing provided)
-        if: ${{ github.event_name != 'pull_request' && (secrets.SIGNING_STORE_FILE_B64 != '' && secrets.SIGNING_STORE_PASSWORD != '' && secrets.SIGNING_KEY_ALIAS != '' && secrets.SIGNING_KEY_PASSWORD != '') }}
-        uses: gradle/gradle-build-action@v2
+          if [ -n "${SIGNING_STORE_FILE_B64}" ] && [ -n "${SIGNING_STORE_PASSWORD}" ] && \
+             [ -n "${SIGNING_KEY_ALIAS}" ] && [ -n "${SIGNING_KEY_PASSWORD}" ]; then
+            mkdir -p app/signing
+            echo "${SIGNING_STORE_FILE_B64}" | base64 -d > app/signing/release.jks
+            echo "Custom signing keystore prepared."
+          else
+            echo "No signing secrets found. Will use debug signing."
+          fi
         env:
-          SIGNING_STORE_FILE: app/signing/release.jks
+          SIGNING_STORE_FILE_B64: ${{ secrets.SIGNING_STORE_FILE_B64 }}
           SIGNING_STORE_PASSWORD: ${{ secrets.SIGNING_STORE_PASSWORD }}
           SIGNING_KEY_ALIAS: ${{ secrets.SIGNING_KEY_ALIAS }}
           SIGNING_KEY_PASSWORD: ${{ secrets.SIGNING_KEY_PASSWORD }}
-        with:
-          gradle-version: '7.6'
-          arguments: :app:assembleRelease --no-daemon --stacktrace
+
+      # بناء نسخة Release موقعة أو debug-signed
+      - name: Build Release
+        run: |
+          if [ -n "${SIGNING_STORE_FILE_B64}" ] && [ -n "${SIGNING_STORE_PASSWORD}" ] && \
+             [ -n "${SIGNING_KEY_ALIAS}" ] && [ -n "${SIGNING_KEY_PASSWORD}" ]; then
+            ./gradlew :app:assembleRelease --no-daemon --stacktrace
+          else
+            echo "No signing config provided. Building unsigned release (will be debug-signed)."
+            ./gradlew :app:assembleRelease --no-daemon --stacktrace
+          fi
+        env:
+          SIGNING_STORE_FILE_B64: ${{ secrets.SIGNING_STORE_FILE_B64 }}
+          SIGNING_STORE_PASSWORD: ${{ secrets.SIGNING_STORE_PASSWORD }}
+          SIGNING_KEY_ALIAS: ${{ secrets.SIGNING_KEY_ALIAS }}
+          SIGNING_KEY_PASSWORD: ${{ secrets.SIGNING_KEY_PASSWORD }}
 
       - name: Upload Release artifacts
-        if: ${{ github.event_name != 'pull_request' && (secrets.SIGNING_STORE_FILE_B64 != '' && secrets.SIGNING_STORE_PASSWORD != '' && secrets.SIGNING_KEY_ALIAS != '' && secrets.SIGNING_KEY_PASSWORD != '') }}
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: app-release-outputs
@@ -80,8 +95,6 @@ jobs:
         if: ${{ github.ref == 'refs/heads/main' }}
         run: |
           rm -rf artifacts && mkdir -p artifacts/debug artifacts/release || true
-          find app/build/outputs -type f -name "*.apk" -exec bash -c 'cp -v "$1" "artifacts/${1##*/}" || true' _ {} \;
-          # Keep directory structure for clarity
           cp -vr app/build/outputs/apk/debug/*.apk artifacts/debug/ 2>/dev/null || true
           cp -vr app/build/outputs/apk/release/*.apk artifacts/release/ 2>/dev/null || true
         shell: bash
