@@ -1,108 +1,76 @@
-name: Android CI
+name: Build Winlator with Wine & Box86
 
 on:
   push:
-    branches: [ "**" ]
+    branches: [ main ]
   pull_request:
-    branches: [ "**" ]
-
-permissions:
-  contents: write
-
-concurrency:
-  group: android-ci-${{ github.ref }}
-  cancel-in-progress: true
+    branches: [ main ]
+  workflow_dispatch:
 
 jobs:
   build:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04
 
     steps:
-      - name: Checkout
+      # 1. سحب الكود مع الـ Submodules
+      - name: Checkout source
         uses: actions/checkout@v4
+        with:
+          submodules: true
 
-      - name: Set up JDK 11 (AGP 7.4 compatible)
+      # 2. تثبيت JDK
+      - name: Set up JDK 11
         uses: actions/setup-java@v4
         with:
           distribution: temurin
-          java-version: '17'
+          java-version: 11
 
-      - name: Set up Android SDK
+      # 3. تثبيت Android SDK
+      - name: Install Android SDK
         uses: android-actions/setup-android@v3
-        with:
-          packages: |
-            platform-tools
-            platforms;android-30
-            build-tools;30.0.3
-            ndk;22.1.7171670
-            cmake;3.22.1
 
-      # بناء نسخة Debug دائماً
-      - name: Build Debug
-        uses: gradle/gradle-build-action@v2
-        with:
-          gradle-version: '7.6'
-          arguments: :app:assembleDebug --no-daemon --stacktrace
+      # 4. تثبيت NDK و CMake
+      - name: Install NDK
+        run: sdkmanager --install "ndk;23.1.7779620" "cmake;3.22.1"
 
-      - name: Upload Debug artifacts
-        if: always()
+      # 5. تثبيت أدوات البناء الإضافية (لـ Wine و Box86)
+      - name: Install build tools
+        run: |
+          sudo apt update
+          sudo apt install -y build-essential cmake ninja-build pkg-config python3-mako python3-setuptools git
+
+      # 6. بناء Box86/Box64
+      - name: Build Box86
+        run: |
+          git clone https://github.com/ptitSeb/box86.git
+          mkdir box86/build && cd box86/build
+          cmake .. -DCMAKE_BUILD_TYPE=Release -DARM_DYNAREC=ON
+          make -j$(nproc)
+          cd ../..
+
+      - name: Build Box64
+        run: |
+          git clone https://github.com/ptitSeb/box64.git
+          mkdir box64/build && cd box64/build
+          cmake .. -DCMAKE_BUILD_TYPE=Release -DARM_DYNAREC=ON
+          make -j$(nproc)
+          cd ../..
+
+      # 7. (اختياري) بناء Wine
+      # ملاحظة: بناء Wine على GitHub Actions معقد وطويل، وأحياناً يستهلك وقت أكثر من المسموح.
+      # في الغالب ستستخدم ملفات Wine جاهزة وتنسخها إلى المشروع.
+
+      # 8. إعطاء صلاحية تشغيل Gradlew
+      - name: Grant permission
+        run: chmod +x gradlew
+
+      # 9. بناء APK
+      - name: Build APK
+        run: ./gradlew assembleDebug
+
+      # 10. رفع الـ APK كـ Artifact
+      - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
-          name: app-debug-outputs
-          path: app/build/outputs/**
-
-      # محاولة تجهيز keystore للتوقيع الرسمي إذا كان موجود
-      - name: Prepare signing keystore (if provided)
-        run: |
-          if [ -n "${SIGNING_STORE_FILE_B64}" ] && [ -n "${SIGNING_STORE_PASSWORD}" ] && \
-             [ -n "${SIGNING_KEY_ALIAS}" ] && [ -n "${SIGNING_KEY_PASSWORD}" ]; then
-            mkdir -p app/signing
-            echo "${SIGNING_STORE_FILE_B64}" | base64 -d > app/signing/release.jks
-            echo "Custom signing keystore prepared."
-          else
-            echo "No signing secrets found. Will use debug signing."
-          fi
-        env:
-          SIGNING_STORE_FILE_B64: ${{ secrets.SIGNING_STORE_FILE_B64 }}
-          SIGNING_STORE_PASSWORD: ${{ secrets.SIGNING_STORE_PASSWORD }}
-          SIGNING_KEY_ALIAS: ${{ secrets.SIGNING_KEY_ALIAS }}
-          SIGNING_KEY_PASSWORD: ${{ secrets.SIGNING_KEY_PASSWORD }}
-
-      # بناء نسخة Release موقعة أو debug-signed
-      - name: Build Release
-        run: |
-          if [ -n "${SIGNING_STORE_FILE_B64}" ] && [ -n "${SIGNING_STORE_PASSWORD}" ] && \
-             [ -n "${SIGNING_KEY_ALIAS}" ] && [ -n "${SIGNING_KEY_PASSWORD}" ]; then
-            ./gradlew :app:assembleRelease --no-daemon --stacktrace
-          else
-            echo "No signing config provided. Building unsigned release (will be debug-signed)."
-            ./gradlew :app:assembleRelease --no-daemon --stacktrace
-          fi
-        env:
-          SIGNING_STORE_FILE_B64: ${{ secrets.SIGNING_STORE_FILE_B64 }}
-          SIGNING_STORE_PASSWORD: ${{ secrets.SIGNING_STORE_PASSWORD }}
-          SIGNING_KEY_ALIAS: ${{ secrets.SIGNING_KEY_ALIAS }}
-          SIGNING_KEY_PASSWORD: ${{ secrets.SIGNING_KEY_PASSWORD }}
-
-      - name: Upload Release artifacts
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: app-release-outputs
-          path: app/build/outputs/**
-
-      - name: Collect APKs into repo artifacts directory (main branch only)
-        if: ${{ github.ref == 'refs/heads/main' }}
-        run: |
-          rm -rf artifacts && mkdir -p artifacts/debug artifacts/release || true
-          cp -vr app/build/outputs/apk/debug/*.apk artifacts/debug/ 2>/dev/null || true
-          cp -vr app/build/outputs/apk/release/*.apk artifacts/release/ 2>/dev/null || true
-        shell: bash
-
-      - name: Commit APKs into repository (main branch only)
-        if: ${{ github.ref == 'refs/heads/main' }}
-        uses: stefanzweifel/git-auto-commit-action@v5
-        with:
-          commit_message: "chore(build): add generated APKs to artifacts/"
-          branch: main
-          file_pattern: artifacts/**
+          name: winlator-apk
+          path: app/build/outputs/apk/debug/app-debug.apk
